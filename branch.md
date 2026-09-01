@@ -7,7 +7,7 @@ scope: "Capture the verified August Laguna S 2.1 NVFP4 DGX Spark deployment prof
 orchestraitor:
   ticket: 6a96dee3e6b6efd51fc86094
 pr:
-  url: https://github.com/team-wcv/laguna-s-2.1-dgx-spark/pull/1
+  url: https://github.com/team-wcv/laguna-s-2.1-dgx-spark/pull/2
   state: open
 ---
 
