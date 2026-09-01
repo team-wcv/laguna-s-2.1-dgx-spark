@@ -2,7 +2,7 @@
 # install.sh — one-time bare-metal setup for poolside/Laguna-S-2.1-NVFP4 on a single
 # NVIDIA DGX Spark (GB10, aarch64). Follows the model card's validated DGX Spark
 # recipe: py3.12 + uv venv + vllm==0.25.1 (cu130) + pinned FlashInfer nightly trio
-# + ~74 GB of HF weights (model + DFlash draft).
+# + the immutable August 2026 target and current DFlash draft (~95 GB on disk).
 #
 # Run ON the Spark as the serving user:  bash install.sh
 # Idempotent — safe to re-run; each step skips when already satisfied.
@@ -22,6 +22,8 @@ VLLM_VERSION="${VLLM_VERSION:-0.25.1}"
 FLASHINFER_PIN="${FLASHINFER_PIN:-0.6.15.dev20260712}"
 MODEL_ID="${MODEL_ID:-poolside/Laguna-S-2.1-NVFP4}"
 DFLASH_MODEL_ID="${DFLASH_MODEL_ID:-poolside/Laguna-S-2.1-DFlash-NVFP4}"
+MODEL_REVISION="${MODEL_REVISION:-826aacdf6d8b2699d4e367def6f17c83b06044c2}"
+DFLASH_REVISION="${DFLASH_REVISION:-b3b5921a900b9e0a1e27e50bdaeb480692a6d19b}"
 HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export HF_HOME
 
@@ -65,18 +67,36 @@ echo "    first serve doesn't JIT the world)"
   "flashinfer-cubin==$FLASHINFER_PIN" \
   "flashinfer-jit-cache==$FLASHINFER_PIN"
 
-echo "== [6/7] huggingface_hub + hf_transfer, then weights (~74 GB total)"
+echo "== [6/7] huggingface_hub + hf_transfer, then pinned weights (~95 GB total)"
 "$UV" pip install --python "$VENV/bin/python" "huggingface_hub[hf_transfer]"
-# ~74 GB weights + venv; require 120 GB free headroom.
-free_kb=$(df --output=avail "$HOME" | tail -n1)
-[ "$free_kb" -ge $((120 * 1024 * 1024)) ] || { echo "FAIL: <120 GB free under $HOME" >&2; exit 1; }
 # If the repo is gated (OpenMDW click-through), accept the license on HF and export HF_TOKEN.
 HF="$VENV/bin/hf"
 [ -x "$HF" ] || HF="$VENV/bin/huggingface-cli"
-for repo in "$MODEL_ID" "$DFLASH_MODEL_ID"; do
-  echo "    downloading $repo ..."
-  HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download "$repo" ${HF_TOKEN:+--token "$HF_TOKEN"}
-done
+
+snapshot_path() {
+  local repo="$1" revision="$2"
+  printf '%s/hub/models--%s/snapshots/%s' "$HF_HOME" "${repo//\//--}" "$revision"
+}
+target_snapshot="$(snapshot_path "$MODEL_ID" "$MODEL_REVISION")"
+draft_snapshot="$(snapshot_path "$DFLASH_MODEL_ID" "$DFLASH_REVISION")"
+if [ ! -f "$target_snapshot/model.safetensors.index.json" ] \
+  || [ ! -f "$draft_snapshot/model.safetensors" ]; then
+  # Keep enough space for incomplete blobs plus the final immutable snapshots.
+  free_kb=$(df --output=avail "$HOME" | tail -n1)
+  [ "$free_kb" -ge $((150 * 1024 * 1024)) ] \
+    || { echo "FAIL: <150 GB free under $HOME for missing snapshots" >&2; exit 1; }
+else
+  echo "    pinned snapshots already complete; skipping the free-space download gate"
+fi
+
+download_revision() {
+  local repo="$1" revision="$2"
+  echo "    downloading $repo@$revision ..."
+  HF_HUB_ENABLE_HF_TRANSFER=1 "$HF" download "$repo" --revision "$revision" \
+    ${HF_TOKEN:+--token "$HF_TOKEN"}
+}
+download_revision "$MODEL_ID" "$MODEL_REVISION"
+download_revision "$DFLASH_MODEL_ID" "$DFLASH_REVISION"
 
 echo "== [7/7] verify imports"
 "$VENV/bin/vllm" --version

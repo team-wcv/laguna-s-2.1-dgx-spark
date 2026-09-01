@@ -9,10 +9,12 @@ LAGUNA_HOME="${LAGUNA_HOME:-$HOME/laguna-s-2.1}"
 VENV="${VENV:-$HOME/venvs/vllm025}"
 MODEL_ID="${MODEL_ID:-poolside/Laguna-S-2.1-NVFP4}"
 DFLASH_MODEL_ID="${DFLASH_MODEL_ID:-poolside/Laguna-S-2.1-DFlash-NVFP4}"
+MODEL_REVISION="${MODEL_REVISION:-826aacdf6d8b2699d4e367def6f17c83b06044c2}"
+DFLASH_REVISION="${DFLASH_REVISION:-b3b5921a900b9e0a1e27e50bdaeb480692a6d19b}"
 HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
-MEM_MARGIN_GIB="${MEM_MARGIN_GIB:-3}"
-LAGUNA_PORT="${LAGUNA_PORT:-8000}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.852}"
+MEM_MARGIN_GIB="${MEM_MARGIN_GIB:-7}"
+LAGUNA_PORT="${LAGUNA_PORT:-8888}"
 SYSCTL_CONF="${SYSCTL_CONF:-/etc/sysctl.d/90-laguna-oom.conf}"
 
 fail() { echo "preflight FAIL: $*" >&2; exit 1; }
@@ -36,16 +38,19 @@ else
   warn "nvidia-smi not answering"
 fi
 
-# 4. Weights present in the HF cache (model + DFlash draft), served offline by HF id.
-hub_dir() { echo "$HF_HOME/hub/models--${1//\//--}"; }
-for repo in "$MODEL_ID" "$DFLASH_MODEL_ID"; do
-  d="$(hub_dir "$repo")"
-  if [ -d "$d" ] && find "$d" -name config.json -print -quit | grep -q .; then
-    ok "weights present: $repo"
-  else
-    fail "weights for $repo not found under $d — run deploy/install.sh first"
-  fi
-done
+# 4. Exact immutable target and draft snapshots are present.
+hub_snapshot() {
+  local repo="$1" revision="$2"
+  printf '%s/hub/models--%s/snapshots/%s' "$HF_HOME" "${repo//\//--}" "$revision"
+}
+MODEL_PATH="${MODEL_PATH:-$(hub_snapshot "$MODEL_ID" "$MODEL_REVISION")}"
+DFLASH_MODEL_PATH="${DFLASH_MODEL_PATH:-$(hub_snapshot "$DFLASH_MODEL_ID" "$DFLASH_REVISION")}"
+[ -f "$MODEL_PATH/config.json" ] && [ -f "$MODEL_PATH/model.safetensors.index.json" ] \
+  || fail "target snapshot missing or incomplete: $MODEL_ID@$MODEL_REVISION ($MODEL_PATH)"
+[ -f "$DFLASH_MODEL_PATH/config.json" ] && [ -f "$DFLASH_MODEL_PATH/model.safetensors" ] \
+  || fail "draft snapshot missing or incomplete: $DFLASH_MODEL_ID@$DFLASH_REVISION ($DFLASH_MODEL_PATH)"
+ok "target snapshot present: $MODEL_ID@$MODEL_REVISION"
+ok "draft snapshot present: $DFLASH_MODEL_ID@$DFLASH_REVISION"
 
 # 5. [FORCE-able] Memory budget: MemAvailable >= util*MemTotal + margin.
 #    Unified memory is exclusive — a thin-margin start is what crash-loops GB10 boxes.

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # serve.sh — hardened single-node serving of poolside/Laguna-S-2.1-NVFP4 on a
-# NVIDIA DGX Spark (GB10). Base: the model card's DGX Spark recipe, flag-for-flag.
+# NVIDIA DGX Spark (GB10). Defaults are the August 2026 replacement checkpoint
+# profile measured on a 128 GB Spark while existing Exo control processes stayed up.
 #
 # Hardening on top of the card recipe:
 #   * preflight gate (memory budget, sysctl drift, weights, port, co-tenant guard)
@@ -8,18 +9,16 @@
 #     launch is what crash-loops GB10 boxes; also softens upstream vllm#46307 profile_run overrun)
 #   * persistent TRITON_CACHE_DIR / FLASHINFER_WORKSPACE_BASE on disk (ephemeral cache =
 #     ~15-min cold recompile on every restart)
-#   * MAX_JOBS=4 ALWAYS (uncapped nvcc JIT fan-out can exhaust the 121 GiB unified memory
-#     and take the whole box down — explicit card warning)
+#   * conservative JIT fan-out (uncapped nvcc can exhaust unified memory)
 #
 # Deliberately NOT set (each a documented footgun — see docs/TUNING.md):
-#   * --max-num-seqs stays 32: DFlash crashes vLLM at the default 256 (card: REQUIRED)
+#   * --max-num-seqs stays 1: the August weights leave too little graph/KV memory
+#     for the older 32-sequence profile
 #   * no min_p / logit_bias: vLLM 400s them under speculation
 #   * no --moe-backend / --linear-backend: auto FlashInferCutlass is correct on sm_121 (0.25.1);
 #     flashinfer_b12x is a broken, slower opt-in
-#   * no --kv-cache-dtype: the checkpoint ships FP8 KV, auto-detected
-#   * no --max-cudagraph-capture-size: 0.25.1's default formula
-#     (min(max_num_seqs*(1+spec)*2, 512) = 512 here) is right — hardcoding half the
-#     engine's natural ceiling is a measured concurrency regression
+#   * no --max-cudagraph-capture-size: the one-sequence default produces the small
+#     capture set that leaves enough memory for a 96K KV cache
 #
 # --default-chat-template-kwargs enable_thinking:true: server-wide thinking default per
 # the base card's agentic recipe. Per-request chat_template_kwargs
@@ -33,45 +32,58 @@ LAGUNA_HOME="${LAGUNA_HOME:-$HOME/laguna-s-2.1}"
 VENV="${VENV:-$HOME/venvs/vllm025}"
 MODEL_ID="${MODEL_ID:-poolside/Laguna-S-2.1-NVFP4}"
 DFLASH_MODEL_ID="${DFLASH_MODEL_ID:-poolside/Laguna-S-2.1-DFlash-NVFP4}"
-NUM_SPEC_TOKENS="${NUM_SPEC_TOKENS:-15}"          # card value; 2.9–3.1 accepted tokens/step on GB10
-MAX_NUM_SEQS="${MAX_NUM_SEQS:-32}"                # REQUIRED with DFlash (crashes at 256)
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-262144}"          # 256K as shipped; 1M needs the config.json edit
-GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
-LAGUNA_HOST="${LAGUNA_HOST:-127.0.0.1}"           # card uses 0.0.0.0; loopback unless remote clients need it
-LAGUNA_PORT="${LAGUNA_PORT:-8000}"
+MODEL_REVISION="${MODEL_REVISION:-826aacdf6d8b2699d4e367def6f17c83b06044c2}"
+DFLASH_REVISION="${DFLASH_REVISION:-b3b5921a900b9e0a1e27e50bdaeb480692a6d19b}"
+NUM_SPEC_TOKENS="${NUM_SPEC_TOKENS:-7}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-1}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-96000}"
+GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.852}"
+LAGUNA_HOST="${LAGUNA_HOST:-0.0.0.0}"             # no auth: expose only on a trusted LAN/Tailnet
+LAGUNA_PORT="${LAGUNA_PORT:-8888}"
 # MAX_NUM_BATCHED_TOKENS: default 8192 — ADOPTED from our AB matrix (see
 #   docs/TUNING.md + docs/PERFORMANCE.md): TTFT −23% @8K, −13% @32K, decode
 #   unchanged, KV pool −5.8%. Unset/empty/`none` reverts to the vLLM default,
 #   which on GB10 falls into the small-GPU heuristic branch
 #   (get_device_total_memory < 70 GiB on unified memory) = 2048, and DFlash
-#   n=15 × max_num_seqs 32 then leaves only max_num_scheduled_tokens=1600
-#   (the engine warns about this). 8192 ⇒ 7744 scheduled. 16384 AB'd worse
-#   (−9% more KV, no TTFT gain).
+#   the engine's small-GPU heuristic still harms long prefill. 8192 is the
+#   verified production value; decode is unchanged by this knob.
 # ATTENTION_BACKEND: auto already picks FlashInferBackend on sm_121 — only
 #   set to force something else.
 # GEN_CONFIG_OVERRIDES: default mirrors the card; note the checkpoint's own
 #   generation_config.json already contributes top_k=20 (verified in logs).
 MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-8192}"
-ATTENTION_BACKEND="${ATTENTION_BACKEND:-}"
-GEN_CONFIG_OVERRIDES="${GEN_CONFIG_OVERRIDES:-{\"temperature\":0.7,\"top_p\":0.95}}"
+ATTENTION_BACKEND="${ATTENTION_BACKEND:-FLASHINFER}"
+KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-fp8}"
+GEN_CONFIG_OVERRIDES="${GEN_CONFIG_OVERRIDES:-{\"temperature\":0.7,\"top_p\":0.95,\"top_k\":20}}"
 HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"             # weights pre-pulled by install.sh; 0 = allow hub lookups
-MEM_MARGIN_GIB="${MEM_MARGIN_GIB:-3}"
+MEM_MARGIN_GIB="${MEM_MARGIN_GIB:-7}"
 MEM_WAIT_MAX_ATTEMPTS="${MEM_WAIT_MAX_ATTEMPTS:-120}"
 MEM_WAIT_POLL_SECONDS="${MEM_WAIT_POLL_SECONDS:-5}"
 
 # --- environment ----------------------------------------------------------------------------
 export HF_HOME HF_HUB_OFFLINE
 export CUTE_DSL_ARCH=sm_121a                       # FP4 kernel JIT arch string (card-required)
-export MAX_JOBS=4                                  # cap nvcc JIT fan-out (card-required)
+export MAX_JOBS="${MAX_JOBS:-2}"
+export NVCC_THREADS="${NVCC_THREADS:-1}"
+export FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
+export VLLM_USE_DEEP_GEMM=0
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export PATH="/usr/local/cuda/bin:$PATH"            # nvcc for JIT
 export TRITON_CACHE_DIR="$LAGUNA_HOME/cache/triton"
 export FLASHINFER_WORKSPACE_BASE="$LAGUNA_HOME/cache/flashinfer"
 mkdir -p "$TRITON_CACHE_DIR" "$FLASHINFER_WORKSPACE_BASE"
-# Optional cold-JIT parallelism caps (repo uses NVCC_THREADS=2 + FLASHINFER_NVCC_THREADS=2
-# alongside MAX_JOBS=4); only exported when set, so baseline stays unchanged.
-[ -n "${NVCC_THREADS:-}" ] && export NVCC_THREADS
-[ -n "${FLASHINFER_NVCC_THREADS:-}" ] && export FLASHINFER_NVCC_THREADS
+
+# Resolve immutable HF snapshots instead of trusting whichever revision a mutable
+# `main` ref happened to point at during download.
+hub_snapshot() {
+  local repo="$1" revision="$2"
+  printf '%s/hub/models--%s/snapshots/%s' "$HF_HOME" "${repo//\//--}" "$revision"
+}
+MODEL_PATH="${MODEL_PATH:-$(hub_snapshot "$MODEL_ID" "$MODEL_REVISION")}"
+DFLASH_MODEL_PATH="${DFLASH_MODEL_PATH:-$(hub_snapshot "$DFLASH_MODEL_ID" "$DFLASH_REVISION")}"
+test -f "$MODEL_PATH/model.safetensors.index.json"
+test -f "$DFLASH_MODEL_PATH/model.safetensors"
 
 # --- gate + memory wait ----------------------------------------------------------------------
 if [ "${SKIP_PREFLIGHT:-0}" != "1" ]; then
@@ -95,20 +107,24 @@ for i in $(seq 1 "$MEM_WAIT_MAX_ATTEMPTS"); do
 done
 
 # --- serve (model card's DGX Spark recipe) ---------------------------------------
-echo "== starting vllm serve $MODEL_ID on $LAGUNA_HOST:$LAGUNA_PORT"
-echo "   first start on a cold cache ≈ 15 min (NVMe load + JIT + graph capture); warm restarts are fast"
+echo "== starting vllm serve $MODEL_ID@$MODEL_REVISION on $LAGUNA_HOST:$LAGUNA_PORT"
+echo "   draft: $DFLASH_MODEL_ID@$DFLASH_REVISION"
+echo "   first start reads a 92.85 GiB checkpoint and can take 15–20 min"
 EXTRA_ARGS=()
 [ -n "$MAX_NUM_BATCHED_TOKENS" ] && [ "$MAX_NUM_BATCHED_TOKENS" != "none" ] \
   && EXTRA_ARGS+=(--max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS")
 [ -n "$ATTENTION_BACKEND" ] && EXTRA_ARGS+=(--attention-backend "$ATTENTION_BACKEND")
-exec "$VENV/bin/vllm" serve "$MODEL_ID" \
+exec "$VENV/bin/vllm" serve "$MODEL_PATH" \
+  --served-model-name "$MODEL_ID" \
   --trust-remote-code \
-  --speculative-config "{\"model\":\"$DFLASH_MODEL_ID\",\"num_speculative_tokens\":$NUM_SPEC_TOKENS}" \
+  --speculative-config "{\"model\":\"$DFLASH_MODEL_PATH\",\"num_speculative_tokens\":$NUM_SPEC_TOKENS,\"method\":\"dflash\"}" \
   --enable-auto-tool-choice \
   --tool-call-parser poolside_v1 \
   --reasoning-parser poolside_v1 \
   --override-generation-config "$GEN_CONFIG_OVERRIDES" \
   --default-chat-template-kwargs '{"enable_thinking":true}' \
+  --kv-cache-dtype "$KV_CACHE_DTYPE" \
+  --enable-prefix-caching \
   --max-num-seqs "$MAX_NUM_SEQS" \
   --max-model-len "$MAX_MODEL_LEN" \
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \

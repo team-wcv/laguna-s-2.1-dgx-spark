@@ -14,7 +14,7 @@ set -uo pipefail
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 KIT="$(cd "$(dirname "$0")" && pwd)"
 
-API_PORT="${API_PORT:-8000}"
+API_PORT="${API_PORT:-8888}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-poolside/Laguna-S-2.1-NVFP4}"
 UNIT="${UNIT:-vllm-laguna.service}"
 PROBE_STATE="$KIT/.watchdog-probe.state"

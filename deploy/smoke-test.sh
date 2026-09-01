@@ -5,13 +5,13 @@
 # server; safe to run any time.
 #
 #   bash smoke-test.sh                 # waits for /health (default up to 25 min — cold start)
-#   BASE=http://127.0.0.1:8000 bash smoke-test.sh
+#   BASE=http://127.0.0.1:8888 bash smoke-test.sh
 #
 # Exit 0 = all hard checks pass. The DFlash-metric check is WARN-only (metric names in
 # vLLM 0.25.1 are not yet verified for DFlash).
 set -uo pipefail
 
-BASE="${BASE:-http://127.0.0.1:8000}"
+BASE="${BASE:-http://127.0.0.1:8888}"
 MODEL="${MODEL:-poolside/Laguna-S-2.1-NVFP4}"
 HEALTH_WAIT_SECS="${HEALTH_WAIT_SECS:-1500}"
 

@@ -258,7 +258,7 @@ def run_batch(url, model, prompt, max_tokens, concurrency, batch_idx,
 
 def main():
     ap = argparse.ArgumentParser(description="V25-AB micro-benchmark (H-1a)")
-    ap.add_argument("--url", default="http://127.0.0.1:8000/v1")
+    ap.add_argument("--url", default="http://127.0.0.1:8888/v1")
     ap.add_argument("--model", default="poolside/Laguna-S-2.1-NVFP4")
     ap.add_argument("--concurrency", type=int, required=True)
     ap.add_argument("--reps", type=int, required=True, help="sequential batches")

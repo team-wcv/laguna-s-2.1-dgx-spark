@@ -1,59 +1,59 @@
 # laguna-s-2.1-dgx-spark
 
 Serve [`poolside/Laguna-S-2.1-NVFP4`](https://huggingface.co/poolside/Laguna-S-2.1-NVFP4)
-(117.6B MoE / 8.5B active, 256K context, NVFP4, DFlash speculative decoding) with **vLLM on a
+(117.6B MoE / 8.5B active, native 1M context, NVFP4, DFlash speculative decoding) with **vLLM on a
 single NVIDIA DGX Spark (GB10)** — bare-metal, no sudo, with a systemd user service, an
 inference watchdog, and a measured tuning recipe.
 
 **Tested on 1x NVIDIA DGX Spark (GB10); deployed and operated from a Mac over SSH.**
 Scope is deliberately single-node: no multi-node/TP=2 content, no multi-model sidecars.
 
-The serving flags follow the model card's own DGX-Spark-validated recipe, plus one measured
-fix the card doesn't mention: on GB10, vLLM 0.25.1 picks the *small-GPU* default for
-`--max-num-batched-tokens` (2048 → only 1600 scheduled tokens under DFlash) because its
-≥70 GiB device-memory heuristic fails on unified memory. Setting it to **8192** buys
-**−23% TTFT at 8K / −13% at 32K prompts** for a 5.8% KV-pool cost. Root cause and AB data:
-[docs/TUNING.md](docs/TUNING.md), [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Poolside replaced the NVFP4 weights in August 2026. This fork pins the replacement target
+and current DFlash draft by immutable revision instead of downloading mutable `main`. The
+replacement target is materially larger than the July checkpoint: vLLM accounted for a
+92.85 GiB checkpoint and loaded target + draft at 95.61 GiB on the measured Spark. The
+older 256K / 32-sequence profile no longer fits safely on one 128 GB box.
 
 ## Deployment specs
 
 | Component | Value |
 |---|---|
 | Model | `poolside/Laguna-S-2.1-NVFP4` — 117.6B total / 8.5B active MoE, 256 routed experts top-10, 48 layers (36 sliding-window + 12 global) |
-| Weights | ~74 GB total: ~72 GB NVFP4 (routed-expert projections FP4, rest BF16; FP8 KV cache baked into the checkpoint) + ~2.2 GB `poolside/Laguna-S-2.1-DFlash-NVFP4` draft |
-| Context | 262,144 (256K) as shipped; 1M native via a config.json edit (vendor quality warning) |
+| Target revision | `826aacdf6d8b2699d4e367def6f17c83b06044c2` (August 25, 2026 replacement) |
+| Draft revision | `b3b5921a900b9e0a1e27e50bdaeb480692a6d19b` |
+| Measured load | 92.85 GiB target checkpoint; 95.61 GiB target + draft in vLLM |
+| Context | 96,000 served; 1,048,576 native model configuration does not fit with this target/draft on one 128 GB Spark |
 | Engine | vLLM **0.25.1** (`--torch-backend=cu130`, aarch64 PyPI wheels) |
 | Kernels | FlashInfer nightly trio **0.6.15.dev20260712** (`flashinfer-python/-cubin/-jit-cache`) |
 | Python | uv-managed CPython **3.12** (bundles `Python.h` — no sudo, no `apt install python3.12-dev`) |
 | Deployment | Bare-metal uv venv on the Spark; systemd **user** service + 5-min watchdog timer |
-| Spec decode | DFlash, 15 speculative tokens (card value — AB-verified against n=8) |
+| Spec decode | DFlash, 7 speculative tokens; 15 was AB-tested and rejected on the August weights |
 | Hardware | 1x DGX Spark: GB10 Grace Blackwell, aarch64, 121 GiB unified memory, CUDA 13 |
 
-## Measured performance (our node, vLLM 0.25.1 + adopted 8192 profile)
+## Measured performance (August replacement checkpoint)
 
 | Metric | Value |
 |---|---|
-| Decode, single stream (production sampling: temp 0.7 / top_p 0.95 / top_k 20, DFlash n=15) | **20.9 tok/s prose · 43.0 tok/s code** |
-| Decode aggregate (512-token probes, temp 1.0) | c1 **14.8** · c4 **38.2** · c8 **56.7** tok/s |
-| TTFT p50 | **2,137 ms @ 8K prompt · 9,940 ms @ 32K prompt** |
-| KV pool | **~870K tokens** (869,932; FP8 KV, util 0.85 — ≈3.3× a full 256K session) |
-| DFlash uplift | ≈**1.5×** prose / ≈**3×** code over the ~13–14 tok/s no-speculation ceiling (memory-bandwidth bound) |
-| Cold start | ≈15 min first boot (weights + JIT + graph capture) · ~1–2 min warm (persistent JIT caches) |
+| Decode, single stream, 512-token code probes | **22.82 · 21.19 tok/s** (22.0 weighted average) |
+| DFlash K=7 acceptance | 3.52 accepted tokens/step; 50.3% drafted-token acceptance |
+| TTFT | 1.02–1.51 s on the final two code probes |
+| KV pool | 111,449 tokens at util 0.852; 1.16× headroom for a 96K request |
+| Functional gates | exact content, `poolside_v1` tool calls, separated reasoning, Tailnet API |
+| Cold start | about 16–18 min to read/load the 95.61 GiB target + draft |
 
-Full tables (baseline vs adopted vs rejected profiles, DFlash depth probe, method and caveats):
-[docs/PERFORMANCE.md](docs/PERFORMANCE.md). Vendor reference on GB10: prefill 600–800 tok/s,
-decode ~15 tok/s prose / 22–24 code with DFlash (2.9–3.1 accepted tokens/step).
+Full current and historical tables, rejected profiles, and method:
+[docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Quickstart
 
-Prerequisites: a DGX Spark on DGX OS / Ubuntu 24.04 with CUDA 13, ~120 GB free disk, SSH
+Prerequisites: a DGX Spark on DGX OS / Ubuntu 24.04 with CUDA 13, ~150 GB free disk, SSH
 access from your Mac, and HF access to the (possibly gated) model repos.
 
 ```bash
 # Mac → Spark: put this repo at ~/laguna-s-2.1 on the Spark
 rsync -av laguna-s-2.1-dgx-spark/ your-spark-host:~/laguna-s-2.1/
 
-# On the Spark (interactive: apt-free, but the weights pull is ~74 GB)
+# On the Spark (interactive: apt-free; downloads immutable target/draft revisions)
 ssh -t your-spark-host 'bash ~/laguna-s-2.1/deploy/install.sh'     # ~15 min + download
 ssh -t your-spark-host 'bash ~/laguna-s-2.1/deploy/serve.sh'       # foreground first run, ~15 min cold start
 ssh your-spark-host 'bash ~/laguna-s-2.1/deploy/smoke-test.sh'     # 7-check acceptance gate
@@ -71,7 +71,7 @@ Full walkthrough incl. boot auto-start (linger), day-2 ops and rollback:
 ## Repo map
 
 - `deploy/install.sh` — one-time setup: uv + managed CPython 3.12, vLLM 0.25.1 cu130,
-  pinned FlashInfer nightly trio, ~74 GB HF weights pull. Idempotent, no sudo.
+  pinned FlashInfer nightly trio and immutable August target/draft pulls. Idempotent, no sudo.
 - `deploy/preflight.sh` — 8 boot guards (venv, JIT headers, GPU, weights, memory budget,
   sysctl drift, port, co-tenant). `FAIL` refuses to start; `FORCE=1` overrides the two marked guards.
 - `deploy/serve.sh` — the hardened serve: card recipe flags + `MAX_NUM_BATCHED_TOKENS=8192`
