@@ -11,25 +11,29 @@
 #   sudo loginctl enable-linger "$USER"
 #   systemctl --user enable vllm-laguna.service
 [Unit]
-Description=vLLM poolside/Laguna-S-2.1-NVFP4 (single-node GB10)
+Description=Poolside Laguna S 2.1 August NVFP4 DFlash 96K profile (single-node GB10)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-# serve.sh runs preflight itself; SKIP_PREFLIGHT=1 avoids the double run under systemd.
-Environment=SKIP_PREFLIGHT=0
-# Loopback by default (serve.sh default). Uncomment to bind all interfaces so remote
-# clients can reach the API — NOTE: this also exposes the API on the LAN with no auth;
-# tighten to loopback or front it with a proxy/firewall if that matters.
-#Environment=LAGUNA_HOST=0.0.0.0
+# ExecStartPre owns the unit's gate; skip serve.sh's duplicate preflight.
+Environment=SKIP_PREFLIGHT=1
+# The fork defaults to 0.0.0.0:8888 for trusted LAN/Tailnet clients. Override to
+# 127.0.0.1 when the host is not protected by a trusted network or reverse proxy.
+#Environment=LAGUNA_HOST=127.0.0.1
 ExecStartPre=%h/laguna-s-2.1/deploy/preflight.sh
 ExecStart=%h/laguna-s-2.1/deploy/serve.sh
 # Post-start primer (non-fatal): health wait + chat/tool/long-prefill probes so the
 # first real request doesn't pay JIT/autotune cold costs.
 ExecStartPost=-%h/laguna-s-2.1/deploy/warmup.sh
-Restart=on-failure
-RestartSec=30
+# Fail closed instead of repeatedly reloading a 95.61 GiB model under pressure.
+Restart=no
+OOMScoreAdjust=500
+MemoryHigh=108G
+MemoryMax=116G
+LimitNOFILE=1048576
+KillMode=mixed
 # Cold start ≈ 15 min (weights + JIT + graph capture); do not let systemd kill it early.
 TimeoutStartSec=1800
 TimeoutStopSec=60

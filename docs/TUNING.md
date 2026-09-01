@@ -1,8 +1,38 @@
 # TUNING — every serve parameter, and why
 
-All knobs are environment variables consumed by `deploy/serve.sh` (defaults shown).
-Nothing here is speculative: each row is either the model card's explicit instruction or a
-measured result from our AB matrix ([PERFORMANCE.md](PERFORMANCE.md)).
+All knobs are environment variables consumed by `deploy/serve.sh`. Poolside replaced the
+NVFP4 weights in August 2026, so current defaults and historical July measurements are
+separated below. Do not apply the July concurrency/depth conclusions to the replacement
+checkpoint.
+
+## August 2026 replacement checkpoint defaults
+
+| Env var | Default | Why |
+|---|---|---|
+| `MODEL_REVISION` | `826aacdf6d8b2699d4e367def6f17c83b06044c2` | Immutable August 25 target; avoids mutable `main` drift |
+| `DFLASH_REVISION` | `b3b5921a900b9e0a1e27e50bdaeb480692a6d19b` | Current quantization-matched draft revision |
+| `NUM_SPEC_TOKENS` | `7` | K=15 accepted more tokens but reduced warm code throughput to 21.11/19.23 tok/s vs K=7's 22.82/21.19 |
+| `MAX_NUM_SEQS` | `1` | K=15 × 32 estimated 8.98 GiB of graphs and left −3.99 GiB for KV; one sequence leaves the small capture set |
+| `MAX_MODEL_LEN` | `96000` | Highest repeatably initialized production cap with active Exo control processes preserved |
+| `GPU_MEMORY_UTILIZATION` | `0.852` | 0.850 varied down to 3.80 GiB KV, 0.09 GiB short of a 96K request; 0.852 produced 4.52 GiB / 111,449 tokens |
+| `MAX_NUM_BATCHED_TOKENS` | `8192` | Preserves the measured long-prefill fix without changing decode |
+| `ATTENTION_BACKEND` / `KV_CACHE_DTYPE` | `FLASHINFER` / `fp8` | Explicitly selects the verified sm_121 native attention and compact KV path |
+| `LAGUNA_HOST` / `LAGUNA_PORT` | `0.0.0.0` / `8888` | Trusted LAN/Tailnet endpoint; no API authentication is provided |
+| `MEM_MARGIN_GIB` | `7` | Requires roughly 110 GiB available before loading the 95.61 GiB target + draft |
+
+JIT fan-out defaults to `MAX_JOBS=2`, `NVCC_THREADS=1`, and
+`FLASHINFER_NVCC_THREADS=1`. The service adds `MemoryHigh=108G`, `MemoryMax=116G`, and
+`OOMScoreAdjust=500`, and fails closed instead of repeatedly reloading after an OOM.
+
+## Current rejected profiles
+
+- **K=15, sequences=32:** cannot allocate KV blocks on the August weights.
+- **K=15, sequences=1:** fits with 104,584 KV tokens, but the extra drafting cost lowers
+  sustained code decode even though accepted length rises from 3.52 to 4.20 tokens/step.
+- **GPU utilization 0.850 at 96K:** boot-to-boot profiling variation can leave only 3.80
+  GiB KV. Use 0.852 or lower `MAX_MODEL_LEN`; do not raise utilization broadly.
+
+## Historical July checkpoint analysis (superseded)
 
 ## The one flag the card doesn't mention: `MAX_NUM_BATCHED_TOKENS=8192`
 
@@ -27,7 +57,7 @@ our node (full table in PERFORMANCE.md):
 This is the default in `serve.sh`. **`MAX_NUM_BATCHED_TOKENS=none` reverts** to passing no
 flag (the engine-default 2048 behavior — the a0 baseline).
 
-## Active knobs (serve.sh env vars)
+## Historical active knobs (July defaults)
 
 | Env var | Default | Why |
 |---|---|---|

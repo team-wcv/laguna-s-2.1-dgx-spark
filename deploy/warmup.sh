@@ -6,7 +6,7 @@
 # Safe to run by hand any time:  bash warmup.sh
 set -uo pipefail
 
-BASE="${BASE:-http://127.0.0.1:8000}"
+BASE="${BASE:-http://127.0.0.1:8888}"
 MODEL="${MODEL:-poolside/Laguna-S-2.1-NVFP4}"
 HEALTH_WAIT_SECS="${HEALTH_WAIT_SECS:-1500}"
 

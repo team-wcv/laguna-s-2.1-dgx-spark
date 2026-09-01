@@ -20,7 +20,7 @@ Conventions used throughout:
 |---|---|
 | NVIDIA DGX Spark, GB10 (aarch64), DGX OS / Ubuntu 24.04 | The whole recipe is ARM-native; x86 wheels/images will not work |
 | CUDA 13 at `/usr/local/cuda` (nvcc on PATH for JIT) | Triton/FlashInfer compile kernels on first start |
-| ~120 GB free disk under `$HOME` | ~74 GB weights + venv + caches |
+| ~150 GB free disk under `$HOME` | ~95 GB pinned target/draft + venv + caches and download headroom |
 | Driver ≥ 580.x | 590.48.01 has a unified-memory leak regression; 580.159.03 verified good |
 | SSH from your Mac | All ops are driven over SSH |
 | Hugging Face access to `poolside/Laguna-S-2.1-NVFP4` + `poolside/Laguna-S-2.1-DFlash-NVFP4` | Possibly gated behind OpenMDW license acceptance — click through on HF and `export HF_TOKEN=...` if the anonymous pull fails |
@@ -38,7 +38,7 @@ sudo sysctl -w vm.min_free_kbytes=2097152
 
 `deploy/preflight.sh` warns if the runtime value drifts from the persisted one (a reboot
 would silently change memory behavior otherwise). A *larger* reserve directly shrinks the
-memory vLLM can budget at `--gpu-memory-utilization 0.85`.
+memory vLLM can budget at `--gpu-memory-utilization 0.852`.
 
 ## 1. Get the repo onto the Spark
 
@@ -66,8 +66,9 @@ What it does (idempotent; each step skips when already satisfied):
    (`flashinfer-python` / `-cubin` / `-jit-cache`) from `https://flashinfer.ai/whl/nightly{/cu130}/`
    with `--index-strategy unsafe-best-match`. Without `flashinfer-python` the NVFP4 path is
    not native on sm_121; `jit-cache` pre-seeds kernels so the first serve doesn't JIT the world.
-6. Pulls the weights (~74 GB total: model + DFlash draft) with `hf_transfer` acceleration,
-   after checking 120 GB of free headroom. Honors `HF_TOKEN` if the repos are gated.
+6. Pulls immutable target `826aacdf6d8b2699d4e367def6f17c83b06044c2` and draft
+   `b3b5921a900b9e0a1e27e50bdaeb480692a6d19b` with `hf_transfer`, after checking 150 GB
+   of free headroom. Honors `HF_TOKEN` if the repos are gated.
 7. Verifies `vllm --version` and `import flashinfer`.
 
 Budget ~15 min plus 20–60 min for the weights, depending on bandwidth.
@@ -83,7 +84,7 @@ ssh your-spark-host 'bash ~/laguna-s-2.1/deploy/smoke-test.sh'
 ```
 
 `serve.sh` first runs `preflight.sh` (8 guards: venv present, JIT headers, GPU visible,
-weights in the HF cache, memory budget `MemAvailable ≥ util×total + 3 GiB`, sysctl drift,
+exact snapshots in the HF cache, memory budget `MemAvailable ≥ util×total + 7 GiB`, sysctl drift,
 port free, no co-tenant vLLM/docker server), then waits for the memory margin, then execs
 `vllm serve` with the card's flags. Every knob is an env override — see
 [TUNING.md](TUNING.md) for the full list and rationale.
@@ -111,10 +112,10 @@ ssh your-spark-host 'mkdir -p ~/.config/systemd/user &&
 ```
 
 - **`vllm-laguna.service`** — `ExecStartPre` preflight, `ExecStart` serve.sh,
-  `ExecStartPost` warmup (non-fatal), `Restart=on-failure`, `TimeoutStartSec=1800` so
-  systemd doesn't kill the 15-min cold start. Binds `127.0.0.1:8000` by default; the unit
-  carries a commented `Environment=LAGUNA_HOST=0.0.0.0` line for LAN access (note: the API
-  has no auth — only expose it on a trusted network).
+  `ExecStartPost` warmup (non-fatal), fail-closed `Restart=no`, 108G/116G cgroup pressure
+  limits, and `TimeoutStartSec=1800` for the cold start. Binds `0.0.0.0:8888` for trusted
+  LAN/Tailnet clients; override `LAGUNA_HOST=127.0.0.1` when the host is not protected.
+  The API has no built-in authentication.
 - **`vllm-laguna-watchdog.timer`** (5 min) — the "health lies" watchdog: `/health` can
   answer while the engine is wedged, so the canary is a real tagged 1-token completion
   (thinking pinned off). On timeout it triages via `/metrics` — a KV-saturated but
@@ -144,9 +145,10 @@ Remember the cold start: the API is up ~15 min after a power-on.
 | Re-run acceptance | `bash ~/laguna-s-2.1/deploy/smoke-test.sh` (read-only, safe any time) |
 | Foreground debug run | `systemctl --user stop vllm-laguna vllm-laguna-watchdog.timer && bash ~/laguna-s-2.1/deploy/serve.sh` |
 
-**Update weights / engine:** re-run `install.sh` with overrides —
-`VLLM_VERSION=... FLASHINFER_PIN=... bash install.sh` — then restart the service. Weights
-are served offline (`HF_HUB_OFFLINE=1` default); a re-pull only happens when you ask for it.
+**Update weights / engine:** change both `MODEL_REVISION`/`DFLASH_REVISION` deliberately,
+re-run `install.sh` with the same overrides, and restart. Do not point production at mutable
+`main`. Engine pins remain overridable with `VLLM_VERSION=... FLASHINFER_PIN=...`.
+Weights are served offline (`HF_HUB_OFFLINE=1` default).
 
 **Roll back a knob:** every serve parameter is an env var in `serve.sh`, so any experiment
 reverts by unsetting it (or `MAX_NUM_BATCHED_TOKENS=none` for the engine default) and

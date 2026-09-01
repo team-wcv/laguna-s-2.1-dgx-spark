@@ -16,8 +16,8 @@ stdout (per-request TTFT/tok/s, batch aggregates, DFlash acceptance deltas scrap
 ## Typical measurements
 
 ```bash
-# Single-stream decode, production sampling (the headline 20.9 prose / 43.0 code tok/s):
-python3 ~/bench.py --server-defaults --concurrency 1 --reps 3 --max-tokens 400 --label decode-c1
+# Single-stream decode, production sampling (August checkpoint production profile):
+python3 ~/bench.py --server-defaults --concurrency 1 --reps 3 --max-tokens 512 --label decode-c1
 
 # Batch decode, engine-comparable temp-1.0 probes (the c1/c4/c8 matrix numbers):
 python3 ~/bench.py --concurrency 8 --reps 2 --max-tokens 512 --label decode-c8
@@ -26,7 +26,7 @@ python3 ~/bench.py --concurrency 8 --reps 2 --max-tokens 512 --label decode-c8
 python3 ~/bench.py --prompt-file prompt-8k.txt --concurrency 1 --reps 2 --max-tokens 32 --label ttft-8k
 ```
 
-Useful flags: `--url` (default `http://127.0.0.1:8000/v1`), `--model`,
+Useful flags: `--url` (default `http://127.0.0.1:8888/v1`), `--model`,
 `--max-tokens` (default 2048), `--concurrency`, `--reps`, `--prompt-file`,
 `--server-defaults`.
 

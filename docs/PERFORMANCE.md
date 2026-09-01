@@ -1,23 +1,49 @@
 # PERFORMANCE — measured on 1x DGX Spark (GB10)
 
-All numbers measured on our node: vLLM 0.25.1 (cu130), FlashInfer 0.6.15.dev20260712,
-`--gpu-memory-utilization 0.85`, 256K max-model-len, DFlash speculative decoding.
-Harness: [`bench/bench.py`](../bench/README.md) (stdlib-only on-node streaming bench
-client). Run date: 2026-07-22.
+## August 2026 replacement checkpoint (current)
 
-> **2026-07-23 — re-validated on Poolside's spinquantless re-quant.** Upstream replaced the
-> tensor weights (`main` → `0761412` "nvfp4: spinquantless norot weights, 256K": new
-> quantization, 14→15 safetensor shards, layer-0 dense MLP now quantized). The numbers below
-> were measured on the original quant; spot-checks on the new weights show them still
-> holding — decode 20.7 tok/s prose (vs 20.9), KV pool 874,988 tokens (vs 869,932), smoke
-> gate 7/7. One caveat: the DFlash draft repo was not updated alongside (still the
-> 2026-07-21 initial release), and the `spec_decode` accepted/drafts ratio now reads
-> ~2.0–2.5 vs the vendor's 2.9–3.1 reference — measured decode throughput is unchanged, so
-> we read this as a draft/quant mismatch in the acceptance metric, not a real regression.
-> Re-check when a re-matched draft ships. No kit changes were needed (no revision pins
-> anywhere — `install.sh` pulls current `main`).
+Poolside replaced the repository weights in August. Current measurements pin target
+`826aacdf6d8b2699d4e367def6f17c83b06044c2` and draft
+`b3b5921a900b9e0a1e27e50bdaeb480692a6d19b` on vLLM 0.25.1 (cu130) with
+FlashInfer 0.6.15.dev20260712. The target has 49 shards; vLLM reports a 92.85 GiB
+checkpoint and a 95.61 GiB loaded target+draft footprint.
 
-## Headline numbers (production config = a1 adopted)
+Production profile: DFlash K=7, max sequences 1, max model length 96,000,
+`max_num_batched_tokens=8192`, FP8 KV, FlashInfer attention, prefix caching, and GPU
+utilization 0.852.
+
+| Metric | Current result |
+|---|---|
+| Warm 512-token code decode | **22.82 · 21.19 tok/s** (22.0 weighted average) |
+| DFlash K=7 | 3.52 accepted tokens/step; 50.3% drafted-token acceptance |
+| TTFT | 1.02–1.51 s |
+| KV cache | 111,449 tokens; 1.16× a 96K request; 4.52 GiB available |
+| Loaded footprint | 95.61 GiB target + draft |
+| Functional gates | exact content, tool calls, separate reasoning, remote API |
+
+### Current-checkpoint tuning verdicts
+
+| Candidate | Fit | Warm code result | Verdict |
+|---|---|---|---|
+| K=7, seqs=1, util 0.852 | 4.52 GiB KV / 111,449 tokens | **22.82 · 21.19** | keep |
+| K=15, seqs=1, util 0.85 | 4.24 GiB KV / 104,584 tokens | 21.11 · 19.23 | reject: draft cost exceeds accepted-length gain |
+| K=15, seqs=32, util 0.85 | −3.99 GiB KV after 8.98 GiB graph estimate | did not start | reject: no KV blocks |
+
+K=15 increased accepted length to 4.20 tokens/step but lowered end-to-end throughput.
+GPU utilization 0.850 also varied enough across boots to leave only 3.80 GiB KV—0.09
+GiB short of a 96K request. The minimal 0.852 adjustment produced a repeatable 4.52 GiB
+KV pool while the systemd unit retained its 108G high/116G hard cgroup limits.
+
+The harness is [`bench/bench.py`](../bench/README.md). Requests used production server
+sampling, thinking disabled, concurrency 1, and 512 output tokens.
+
+## Historical July checkpoint (superseded)
+
+The remaining tables are retained as historical evidence only. They were collected on
+2026-07-22/23 against the earlier ~72 GiB target and must not be used as expected results
+for the August replacement checkpoint.
+
+### Historical headline numbers (production config = a1 adopted)
 
 | Metric | Value |
 |---|---|

@@ -12,6 +12,6 @@ pr:
 ---
 
 - Why this branch exists: Preserve the production-pinned August target/draft revisions and the measured single-Spark profile in the team-wcv fork.
-- Changed paths: pending
-- Validation run: pending
+- Changed paths: deployment install/preflight/serve/unit and endpoint defaults; current/historical docs; benchmark defaults; executable profile argument test.
+- Validation run: all shell scripts parse; Python benchmark compiles; `tests/test-current-profile.sh` passes; fork preflight passes on the Spark against both pinned snapshots; live profile previously passed code, tool-call, reasoning, API, and Exo-runner health gates.
 - Known follow-ups: The current Exo CUDA capability does not provide a vLLM worker engine; this recipe remains an OpenAI-compatible vLLM sidecar.
