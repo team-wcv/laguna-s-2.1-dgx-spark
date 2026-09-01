@@ -2,7 +2,7 @@
 branch: chore/6a96dee3-laguna-august-profile
 created: 2026-09-01
 owner: codex-agent
-status: active
+status: review
 scope: "Capture the verified August Laguna S 2.1 NVFP4 DGX Spark deployment profile and tuning evidence"
 orchestraitor:
   ticket: 6a96dee3e6b6efd51fc86094
